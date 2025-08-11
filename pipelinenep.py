@@ -10,12 +10,9 @@ from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 from transformers import AutoProcessor, CLIPVisionModelWithProjection
 
 
-# Research Note: These UNet models (UNetGarm2DConditionModel, UNetVton2DConditionModel)
-# various Nepali traditional garments. This involves architectural tweaks to make the drape more in fusion with the western ones
-# like specialized attention mechanisms for intricate patterns (e.g., Dhaka fabric)
-# or different residual blocks.
-from models.unet_Nepgarm_condition import UNetGarm2DConditionModel # Renamed for clarity
-from models.unet_Nepvton_condition import UNetVton2DConditionModel # Renamed for clarity
+
+from models.unet_Nepgarm_condition import UNetGarm2DConditionModel 
+from models.unet_Nepvton_condition import UNetVton2DConditionModel 
 
 from diffusers.configuration_utils import FrozenDict
 from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
@@ -77,10 +74,8 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             Frozen text-encoder ([clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14)).
         tokenizer ([`~transformers.CLIPTokenizer`]):
             A `CLIPTokenizer` to tokenize text.
-        unet_garm ([`UNetGarm2DConditionModelNepali`]): # Updated UNet name
-            A `UNetGarm2DConditionModelNepali` to denoise the encoded garment latents.
-        unet_vton ([`UNetVton2DConditionModelNepali`]): # Updated UNet name
-            A `UNetVton2DConditionModelNepali` to denoise the encoded image latents for try-on.
+        unet ([`UNet2DConditionModel`]):
+            A `UNet2DConditionModel` to denoise the encoded image latents.
         scheduler ([`SchedulerMixin`]):
             A scheduler to be used in combination with `unet` to denoise the encoded image latents. Can be one of
             [`DDIMScheduler`], [`LMSDiscreteScheduler`], or [`PNDMScheduler`].
@@ -91,7 +86,7 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         feature_extractor ([`~transformers.CLIPImageProcessor`]):
             A `CLIPImageProcessor` to extract features from generated images; used as inputs to the `safety_checker`.
     """
-    model_cpu_offload_seq = "text_encoder->unet_garm->unet_vton->vae" # Adjusted offload sequence
+    model_cpu_offload_seq = "text_encoder->unet->vae"
     _optional_components = ["safety_checker", "feature_extractor"]
     _exclude_from_cpu_offload = ["safety_checker"]
     _callback_tensor_inputs = ["latents", "prompt_embeds", "vton_latents"]
@@ -101,8 +96,8 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         vae: AutoencoderKL,
         text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
-        unet_garm: UNetGarm2DConditionModel, # Updated UNet type
-        unet_vton: UNetVton2DConditionModel, # Updated UNet type
+        unet_garm: UNetGarm2DConditionModel,
+        unet_vton: UNetVton2DConditionModel,
         scheduler: KarrasDiffusionSchedulers,
         safety_checker: StableDiffusionSafetyChecker,
         feature_extractor: CLIPImageProcessor,
@@ -130,8 +125,8 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             vae=vae,
             text_encoder=text_encoder,
             tokenizer=tokenizer,
-            unet_garm_model=unet_garm, # Renamed attribute for clarity
-            unet_vton_model=unet_vton, # Renamed attribute for clarity
+            unet_garm=unet_garm,
+            unet_vton=unet_vton,
             scheduler=scheduler,
             safety_checker=safety_checker,
             feature_extractor=feature_extractor,
@@ -144,10 +139,10 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
     def __call__(
         self,
         prompt: Union[str, List[str]] = None,
-        garment_image: PipelineImageInput = None, # Renamed input
-        person_image: PipelineImageInput = None, # Renamed input
-        mask_image: PipelineImageInput = None, # Renamed input
-        original_person_image: PipelineImageInput = None, # Renamed input
+        image_garm: PipelineImageInput = None,
+        image_vton: PipelineImageInput = None,
+        mask: PipelineImageInput = None,
+        image_ori: PipelineImageInput = None,
         num_inference_steps: int = 100,
         guidance_scale: float = 7.5,
         image_guidance_scale: float = 1.5,
@@ -165,33 +160,24 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         **kwargs,
     ):
         r"""
-        The call function to the pipeline for generating virtual try-on images of Nepali wear. # Updated docstring
+        The call function to the pipeline for generation.
 
         Args:
             prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide image generation. If not defined, you need to pass `prompt_embeds`.
-                # Research Note: Specific prompts tailored for Nepali wear (e.g., "traditional Nepali sari,"
-                # "Daura Suruwal with Dhaka topi") could significantly improve results.
-            garment_image (`torch.FloatTensor` `np.ndarray`, `PIL.Image.Image`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`): # Updated arg name
-                The garment image to be virtually tried on.
-            person_image (`torch.FloatTensor` `np.ndarray`, `PIL.Image.Image`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`): # Updated arg name
-                The person image onto whom the garment will be tried.
-            mask_image (`torch.FloatTensor` `np.ndarray`, `PIL.Image.Image`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`): # Updated arg name
-                The mask indicating the region of the person's body where the garment should be placed.
-                # Research Note: The quality of the mask is paramount for realistic try-ons. For traditional
-                # Nepali attire, masks might need to be more precise to handle intricate draping or layers.
-            original_person_image (`torch.FloatTensor` `np.ndarray`, `PIL.Image.Image`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`): # Updated arg name
-                The original person image, used for repainting.
+            image (`torch.FloatTensor` `np.ndarray`, `PIL.Image.Image`, `List[torch.FloatTensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
+                `Image` or tensor representing an image batch to be repainted according to `prompt`. Can also accept
+                image latents as `image`, but if passing latents directly it is not encoded again.
             num_inference_steps (`int`, *optional*, defaults to 100):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
             guidance_scale (`float`, *optional*, defaults to 7.5):
                 A higher guidance scale value encourages the model to generate images closely linked to the text
                 `prompt` at the expense of lower image quality. Guidance scale is enabled when `guidance_scale > 1`.
-            image_guidance_scale (`float`, *optional!, defaults to 1.5):
-                Push the generated image towards the initial `person_image`. Image guidance scale is enabled by setting
+            image_guidance_scale (`float`, *optional*, defaults to 1.5):
+                Push the generated image towards the initial `image`. Image guidance scale is enabled by setting
                 `image_guidance_scale > 1`. Higher image guidance scale encourages generated images that are closely
-                linked to the source `person_image`, usually at the expense of lower image quality. This pipeline requires a
+                linked to the source `image`, usually at the expense of lower image quality. This pipeline requires a
                 value of at least `1`.
             negative_prompt (`str` or `List[str]`, *optional*):
                 The prompt or prompts to guide what to not include in image generation. If not defined, you need to
@@ -208,7 +194,7 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 Pre-generated noisy latents sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
                 tensor is generated by sampling using the supplied random `generator`.
-            prompt_embeds (`torch.FloatTensor`, *optional`):
+            prompt_embeds (`torch.FloatTensor`, *optional*):
                 Pre-generated text embeddings. Can be used to easily tweak text inputs (prompt weighting). If not
                 provided, text embeddings are generated from the `prompt` input argument.
             negative_prompt_embeds (`torch.FloatTensor`, *optional*):
@@ -254,7 +240,7 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             )
 
         # 0. Check inputs
-        self.check_pipeline_inputs( # Renamed method
+        self.check_inputs(
             prompt,
             callback_steps,
             negative_prompt,
@@ -265,8 +251,8 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         self._guidance_scale = guidance_scale
         self._image_guidance_scale = image_guidance_scale
 
-        if (person_image is None) or (garment_image is None): # Updated variable names
-            raise ValueError("`person_image` and `garment_image` inputs cannot be undefined.") # Updated error message
+        if (image_vton is None) or (image_garm is None):
+            raise ValueError("`image` input cannot be undefined.")
 
         # 1. Define call parameters
         if prompt is not None and isinstance(prompt, str):
@@ -291,27 +277,24 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             negative_prompt_embeds=negative_prompt_embeds,
         )
 
-        # 3. Preprocess images and mask
-        # Research Note: For Nepali wear, ensuring consistent preprocessing across diverse
-        # garment types (sari, daura suruwal, lehenga, etc.) is important.
-        processed_garment_image = self.image_processor.preprocess(garment_image) # Renamed variable
-        processed_person_image = self.image_processor.preprocess(person_image) # Renamed variable
-        processed_original_person_image = self.image_processor.preprocess(original_person_image) # Renamed variable
-
-        processed_mask = np.array(mask_image) # Renamed variable
-        processed_mask[processed_mask < 127] = 0
-        processed_mask[processed_mask >= 127] = 255
-        processed_mask = torch.tensor(processed_mask)
-        processed_mask = processed_mask / 255
-        processed_mask = processed_mask.reshape(-1, 1, processed_mask.size(-2), processed_mask.size(-1))
+        # 3. Preprocess image
+        image_garm = self.image_processor.preprocess(image_garm)
+        image_vton = self.image_processor.preprocess(image_vton)
+        image_ori = self.image_processor.preprocess(image_ori)
+        mask = np.array(mask)
+        mask[mask < 127] = 0
+        mask[mask >= 127] = 255
+        mask = torch.tensor(mask)
+        mask = mask / 255
+        mask = mask.reshape(-1, 1, mask.size(-2), mask.size(-1))
 
         # 4. set timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
 
-        # 5. Prepare Garment and VTON latents
-        garment_latents = self.prepare_garment_latents( 
-            processed_garment_image, 
+        # 5. Prepare Image latents
+        garm_latents = self.prepare_garm_latents(
+            image_garm,
             batch_size,
             num_images_per_prompt,
             prompt_embeds.dtype,
@@ -320,10 +303,10 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             generator,
         )
 
-        vton_latents, mask_latents, original_person_latents = self.prepare_tryon_latents( # Renamed method and variable
-            processed_person_image, 
-            processed_mask, 
-            processed_original_person_image, 
+        vton_latents, mask_latents, image_ori_latents = self.prepare_vton_latents(
+            image_vton,
+            mask,
+            image_ori,
             batch_size,
             num_images_per_prompt,
             prompt_embeds.dtype,
@@ -336,9 +319,9 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         height = height * self.vae_scale_factor
         width = width * self.vae_scale_factor
 
-        # 6. Prepare latent variables for diffusion
+        # 6. Prepare latent variables
         num_channels_latents = self.vae.config.latent_channels
-        diffusion_latents = self.prepare_diffusion_latents( # Renamed method and variable
+        latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -349,45 +332,37 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             latents,
         )
 
-        noise = diffusion_latents.clone() # Renamed variable
+        noise = latents.clone()
 
-        # 7. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        # 8. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
-        # 8. Denoising loop
+        # 9. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
 
-        # Compute garment features using unet_garm_model
-        # Research Note: The quality of garment feature extraction is crucial.
-        # For Nepali wear, this needs to accurately capture intricate embroidery,
-        # fabric textures (e.g., Dhaka), and unique garment silhouettes.
-        _, garment_spatial_attention_outputs = self.unet_garm_model( # Updated attribute name
-            garment_latents,
-            0, # Timestep 0 for garment feature extraction
+        _, spatial_attn_outputs = self.unet_garm(
+            garm_latents,
+            0,
             encoder_hidden_states=prompt_embeds,
             return_dict=False,
         )
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                latent_model_input = torch.cat([diffusion_latents] * 2) if self.do_classifier_free_guidance else diffusion_latents
+                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
                 # concat latents, image_latents in the channel dimension
                 scaled_latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-                # Research Note: The concatenation strategy here (channel dimension) is standard.
-                # Explore if other fusion methods (e.g., adaptive instance normalization,
-                # more complex cross-attention in UNetVton2DConditionModelNepali) could better
-                # blend Nepali garment features.
                 latent_vton_model_input = torch.cat([scaled_latent_model_input, vton_latents], dim=1)
+                # latent_vton_model_input = scaled_latent_model_input + vton_latents
 
-                # Pass garment features to the VTON UNet
-                vton_spatial_attention_inputs = garment_spatial_attention_outputs.copy() # Renamed variable
+                spatial_attn_inputs = spatial_attn_outputs.copy()
 
                 # predict the noise residual
-                noise_pred = self.unet_vton_model( # Updated attribute name
+                noise_pred = self.unet_vton(
                     latent_vton_model_input,
-                    vton_spatial_attention_inputs, # Updated variable
+                    spatial_attn_inputs,
                     t,
                     encoder_hidden_states=prompt_embeds,
                     return_dict=False,
@@ -417,39 +392,29 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 # need to overwrite the noise_pred here such that the value of the computed
                 # predicted_original_sample is correct.
                 if scheduler_is_in_sigma_space:
-                    noise_pred = (noise_pred - diffusion_latents) / (-sigma) # Updated variable
+                    noise_pred = (noise_pred - latents) / (-sigma)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                diffusion_latents = self.scheduler.step(noise_pred, t, diffusion_latents, **extra_step_kwargs, return_dict=False)[0] # Updated variable
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
-                init_latents_proper = original_person_latents * self.vae.config.scaling_factor # Updated variable
+                init_latents_proper = image_ori_latents * self.vae.config.scaling_factor
 
                 # repainting
-                # Research Note: The repainting step is critical for seamless integration,
-                # especially for areas where the original body parts should show through
-                # or where the garment needs to interact with the body's contours.
-                # For Nepali wear, this might require careful handling of exposed skin
-                # areas (e.g., midriff for a sari, neck for a cholo).
                 if i < len(timesteps) - 1:
                     noise_timestep = timesteps[i + 1]
                     init_latents_proper = self.scheduler.add_noise(
                         init_latents_proper, noise, torch.tensor([noise_timestep])
                     )
 
-                diffusion_latents = (1 - mask_latents) * init_latents_proper + mask_latents * diffusion_latents # Updated variable
+                latents = (1 - mask_latents) * init_latents_proper + mask_latents * latents
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
-                        # Safely retrieve local variables
-                        if k in locals():
-                            callback_kwargs[k] = locals()[k]
-                        else:
-                            logger.warning(f"Callback tensor input '{k}' not found in local variables.")
-
+                        callback_kwargs[k] = locals()[k]
                     callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
 
-                    diffusion_latents = callback_outputs.pop("latents", diffusion_latents) # Updated variable
+                    latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
                     negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
                     vton_latents = callback_outputs.pop("vton_latents", vton_latents)
@@ -459,30 +424,29 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, diffusion_latents) # Updated variable
+                        callback(step_idx, t, latents)
 
         if not output_type == "latent":
-            final_image = self.vae.decode(diffusion_latents / self.vae.config.scaling_factor, return_dict=False)[0] # Renamed variable
-            final_image, has_nsfw_concept = self.run_safety_checker(final_image, device, prompt_embeds.dtype) # Renamed variable
+            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
         else:
-            final_image = diffusion_latents # Renamed variable
+            image = latents
             has_nsfw_concept = None
 
         if has_nsfw_concept is None:
-            do_denormalize = [True] * final_image.shape[0]
+            do_denormalize = [True] * image.shape[0]
         else:
             do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
-        final_image = self.image_processor.postprocess(final_image, output_type=output_type, do_denormalize=do_denormalize) # Renamed variable
+        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
         # Offload all models
         self.maybe_free_model_hooks()
 
         if not return_dict:
-            return (final_image, has_nsfw_concept)
+            return (image, has_nsfw_concept)
 
-        return StableDiffusionPipelineOutput(images=final_image, nsfw_content_detected=has_nsfw_concept)
-
+        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
 
     def _encode_prompt(
         self,
@@ -658,7 +622,7 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
         return image
 
-    def check_pipeline_inputs( # Renamed method
+    def check_inputs(
         self,
         prompt,
         callback_steps,
@@ -707,7 +671,7 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 )
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.prepare_latents
-    def prepare_diffusion_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None): # Renamed method
+    def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
         shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
@@ -724,23 +688,20 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
         latents = latents * self.scheduler.init_noise_sigma
         return latents
 
-    def prepare_garment_latents( # Renamed method
-        self, image_garm, batch_size, num_images_per_prompt, dtype, device, do_classifier_free_guidance, generator=None
+    def prepare_garm_latents(
+        self, image, batch_size, num_images_per_prompt, dtype, device, do_classifier_free_guidance, generator=None
     ):
-        # Research Note: For diverse Nepali garments, robust encoding of varied
-        # textures (e.g., silk, cotton, wool, Dhaka), patterns, and fabric stiffness
-        # is critical for realistic try-on results.
-        if not isinstance(image_garm, (torch.Tensor, PIL.Image.Image, list)):
+        if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
             raise ValueError(
-                f"`image_garm` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image_garm)}"
+                f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
             )
 
-        image_garm = image_garm.to(device=device, dtype=dtype)
+        image = image.to(device=device, dtype=dtype)
 
         batch_size = batch_size * num_images_per_prompt
 
-        if image_garm.shape[1] == 4:
-            garment_latents = image_garm # Renamed variable
+        if image.shape[1] == 4:
+            image_latents = image
         else:
             if isinstance(generator, list) and len(generator) != batch_size:
                 raise ValueError(
@@ -749,47 +710,43 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 )
 
             if isinstance(generator, list):
-                garment_latents = [self.vae.encode(image_garm[i : i + 1]).latent_dist.mode() for i in range(batch_size)] # Renamed variable
-                garment_latents = torch.cat(garment_latents, dim=0)
+                image_latents = [self.vae.encode(image[i : i + 1]).latent_dist.mode() for i in range(batch_size)]
+                image_latents = torch.cat(image_latents, dim=0)
             else:
-                garment_latents = self.vae.encode(image_garm).latent_dist.mode() # Renamed variable
+                image_latents = self.vae.encode(image).latent_dist.mode()
 
-        if batch_size > garment_latents.shape[0] and batch_size % garment_latents.shape[0] == 0:
-            additional_image_per_prompt = batch_size // garment_latents.shape[0]
-            garment_latents = torch.cat([garment_latents] * additional_image_per_prompt, dim=0)
-        elif batch_size > garment_latents.shape[0] and batch_size % garment_latents.shape[0] != 0:
+        if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
+            additional_image_per_prompt = batch_size // image_latents.shape[0]
+            image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+        elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
             raise ValueError(
-                f"Cannot duplicate `image_garm` of batch size {garment_latents.shape[0]} to {batch_size} text prompts."
+                f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
             )
         else:
-            garment_latents = torch.cat([garment_latents], dim=0)
+            image_latents = torch.cat([image_latents], dim=0)
 
         if do_classifier_free_guidance:
-            uncond_garment_latents = torch.zeros_like(garment_latents) # Renamed variable
-            garment_latents = torch.cat([garment_latents, uncond_garment_latents], dim=0) # Renamed variable
+            uncond_image_latents = torch.zeros_like(image_latents)
+            image_latents = torch.cat([image_latents, uncond_image_latents], dim=0)
 
-        return garment_latents
-
-    def prepare_tryon_latents( # Renamed method
-        self, person_image, mask, original_person_image, batch_size, num_images_per_prompt, dtype, device, do_classifier_free_guidance, generator=None
+        return image_latents
+    
+    def prepare_vton_latents(
+        self, image, mask, image_ori, batch_size, num_images_per_prompt, dtype, device, do_classifier_free_guidance, generator=None
     ):
-        # Research Note: For accurate try-on of Nepali garments, the pose and body
-        # shape encoding from the person image is crucial for realistic drape and fit.
-        # This might require specialized pose estimation or shape representations
-        # if cultural poses are common in the dataset.
-        if not isinstance(person_image, (torch.Tensor, PIL.Image.Image, list)):
+        if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
             raise ValueError(
-                f"`person_image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(person_image)}"
+                f"`image` has to be of type `torch.Tensor`, `PIL.Image.Image` or list but is {type(image)}"
             )
 
-        person_image = person_image.to(device=device, dtype=dtype) # Renamed variable
-        original_person_image = original_person_image.to(device=device, dtype=dtype) # Renamed variable
+        image = image.to(device=device, dtype=dtype)
+        image_ori = image_ori.to(device=device, dtype=dtype)
 
         batch_size = batch_size * num_images_per_prompt
 
-        if person_image.shape[1] == 4:
-            person_latents = person_image # Renamed variable
-            original_person_latents = original_person_image # Renamed variable
+        if image.shape[1] == 4:
+            image_latents = image
+            image_ori_latents = image_ori
         else:
             if isinstance(generator, list) and len(generator) != batch_size:
                 raise ValueError(
@@ -798,41 +755,38 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
                 )
 
             if isinstance(generator, list):
-                person_latents = [self.vae.encode(person_image[i : i + 1]).latent_dist.mode() for i in range(batch_size)] # Renamed variable
-                person_latents = torch.cat(person_latents, dim=0)
-                original_person_latents = [self.vae.encode(original_person_image[i : i + 1]).latent_dist.mode() for i in range(batch_size)] # Renamed variable
-                original_person_latents = torch.cat(original_person_latents, dim=0)
+                image_latents = [self.vae.encode(image[i : i + 1]).latent_dist.mode() for i in range(batch_size)]
+                image_latents = torch.cat(image_latents, dim=0)
+                image_ori_latents = [self.vae.encode(image_ori[i : i + 1]).latent_dist.mode() for i in range(batch_size)]
+                image_ori_latents = torch.cat(image_ori_latents, dim=0)
             else:
-                person_latents = self.vae.encode(person_image).latent_dist.mode() # Renamed variable
-                original_person_latents = self.vae.encode(original_person_image).latent_dist.mode() # Renamed variable
+                image_latents = self.vae.encode(image).latent_dist.mode()
+                image_ori_latents = self.vae.encode(image_ori).latent_dist.mode()
 
         mask = torch.nn.functional.interpolate(
-            mask, size=(person_latents.size(-2), person_latents.size(-1)) # Using person_latents size
+            mask, size=(image_latents.size(-2), image_latents.size(-1))
         )
-        mask_latents = mask.to(device=device, dtype=dtype) # Renamed variable
+        mask = mask.to(device=device, dtype=dtype)
 
-        if batch_size > person_latents.shape[0] and batch_size % person_latents.shape[0] == 0:
-            additional_image_per_prompt = batch_size // person_latents.shape[0]
-            person_latents = torch.cat([person_latents] * additional_image_per_prompt, dim=0)
-            mask_latents = torch.cat([mask_latents] * additional_image_per_prompt, dim=0)
-            original_person_latents = torch.cat([original_person_latents] * additional_image_per_prompt, dim=0)
-        elif batch_size > person_latents.shape[0] and batch_size % person_latents.shape[0] != 0:
+        if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
+            additional_image_per_prompt = batch_size // image_latents.shape[0]
+            image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+            mask = torch.cat([mask] * additional_image_per_prompt, dim=0)
+            image_ori_latents = torch.cat([image_ori_latents] * additional_image_per_prompt, dim=0)
+        elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
             raise ValueError(
-                f"Cannot duplicate `person_image` of batch size {person_latents.shape[0]} to {batch_size} text prompts."
+                f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
             )
         else:
-            person_latents = torch.cat([person_latents], dim=0)
-            mask_latents = torch.cat([mask_latents], dim=0)
-            original_person_latents = torch.cat([original_person_latents], dim=0)
+            image_latents = torch.cat([image_latents], dim=0)
+            mask = torch.cat([mask], dim=0)
+            image_ori_latents = torch.cat([image_ori_latents], dim=0)
 
         if do_classifier_free_guidance:
-            # uncond_image_latents = torch.zeros_like(person_latents) # No need for explicit uncond_image_latents if cat operation handles it
-            person_latents = torch.cat([person_latents] * 2, dim=0)
-            # Research Note: The mask and original person latents are not concatenated with uncond,
-            # implying they are consistent across conditional/unconditional paths. This might need
-            # careful consideration if the mask itself varies for conditional generation.
+            # uncond_image_latents = torch.zeros_like(image_latents)
+            image_latents = torch.cat([image_latents] * 2, dim=0)
 
-        return person_latents, mask_latents, original_person_latents
+        return image_latents, mask, image_ori_latents
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_freeu
     def enable_freeu(self, s1: float, s2: float, b1: float, b2: float):
@@ -853,14 +807,14 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
             b1 (`float`): Scaling factor for stage 1 to amplify the contributions of backbone features.
             b2 (`float`): Scaling factor for stage 2 to amplify the contributions of backbone features.
         """
-        if not hasattr(self, "unet_vton_model"): # Changed from self.unet
-            raise ValueError("The pipeline must have `unet_vton_model` for using FreeU.") # Updated error message
-        self.unet_vton_model.enable_freeu(s1=s1, s2=s2, b1=b1, b2=b2) # Changed from self.unet
+        if not hasattr(self, "unet"):
+            raise ValueError("The pipeline must have `unet` for using FreeU.")
+        self.unet_vton.enable_freeu(s1=s1, s2=s2, b1=b1, b2=b2)
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_freeu
     def disable_freeu(self):
         """Disables the FreeU mechanism if enabled."""
-        self.unet_vton_model.disable_freeu() # Changed from self.unet
+        self.unet_vton.disable_freeu()
 
     @property
     def guidance_scale(self):
@@ -874,6 +828,9 @@ class NepaliWearVtonPipeline(DiffusionPipeline, TextualInversionLoaderMixin, Lor
     def num_timesteps(self):
         return self._num_timesteps
 
+    # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
+    # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
+    # corresponds to doing no classifier free guidance.
     @property
     def do_classifier_free_guidance(self):
         return self.image_guidance_scale >= 1.0

@@ -1,3 +1,19 @@
+# Copyright 2023 The HuggingFace Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Modified by Yuhao Xu for OOTDiffusion (https://github.com/levihsu/OOTDiffusion)
+# Modified by Aabrity Dhungana for NepWear-VTON
 from typing import Any, Dict, Optional
 
 import torch
@@ -14,48 +30,80 @@ from diffusers.models.normalization import AdaLayerNorm, AdaLayerNormZero
 
 @maybe_allow_in_graph
 class GatedSelfAttentionDense(nn.Module):
-    """
-    Gated attention unit designed for feature fusion.
+    r"""
+    A gated self-attention dense layer that combines visual features and object features.
 
-    This is a candidate module for integrating cultural feature conditioning
-    in the NepVTON pipeline. E.g., embeddings related to cultural context can
-    be passed in `objs` to steer the attention towards regional garment attributes.
+    Parameters:
+        query_dim (`int`): The number of channels in the query.
+        context_dim (`int`): The number of channels in the context.
+        n_heads (`int`): The number of heads to use for attention.
+        d_head (`int`): The number of channels in each head.
     """
+
     def __init__(self, query_dim: int, context_dim: int, n_heads: int, d_head: int):
         super().__init__()
 
-        self.linear_proj = nn.Linear(context_dim, query_dim)
-        self.attention = Attention(query_dim=query_dim, heads=n_heads, dim_head=d_head)
-        self.feedforward = FeedForward(query_dim, activation_fn="geglu")
+        # we need a linear projection since we need cat visual feature and obj feature
+        self.linear = nn.Linear(context_dim, query_dim)
+
+        self.attn = Attention(query_dim=query_dim, heads=n_heads, dim_head=d_head)
+        self.ff = FeedForward(query_dim, activation_fn="geglu")
 
         self.norm1 = nn.LayerNorm(query_dim)
         self.norm2 = nn.LayerNorm(query_dim)
 
-        self.alpha_attn = nn.Parameter(torch.tensor(0.0))
-        self.alpha_ff = nn.Parameter(torch.tensor(0.0))
+        self.register_parameter("alpha_attn", nn.Parameter(torch.tensor(0.0)))
+        self.register_parameter("alpha_dense", nn.Parameter(torch.tensor(0.0)))
+
         self.enabled = True
 
-    def forward(self, visual_feats: torch.Tensor, context_feats: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, objs: torch.Tensor) -> torch.Tensor:
         if not self.enabled:
-            return visual_feats
+            return x
 
-        n_tokens = visual_feats.shape[1]
-        context_feats = self.linear_proj(context_feats)
+        n_visual = x.shape[1]
+        objs = self.linear(objs)
 
-        combined = torch.cat([visual_feats, context_feats], dim=1)
-        attention_output = self.attention(self.norm1(combined))[:, :n_tokens, :]
-        fused = visual_feats + self.alpha_attn.tanh() * attention_output
-        fused = fused + self.alpha_ff.tanh() * self.feedforward(self.norm2(fused))
+        x = x + self.alpha_attn.tanh() * self.attn(self.norm1(torch.cat([x, objs], dim=1)))[:, :n_visual, :]
+        x = x + self.alpha_dense.tanh() * self.ff(self.norm2(x))
 
-        return fused
+        return x
 
 
 @maybe_allow_in_graph
 class BasicTransformerBlock(nn.Module):
-    """
-    Transformer block with optional GLIGEN control and advanced normalization.
+    r"""
+    A basic Transformer block.
 
-    Ideal location to inject localized or ethnicity-aware embeddings for Nepalese traditional outfit guidance.
+    Parameters:
+        dim (`int`): The number of channels in the input and output.
+        num_attention_heads (`int`): The number of heads to use for multi-head attention.
+        attention_head_dim (`int`): The number of channels in each head.
+        dropout (`float`, *optional*, defaults to 0.0): The dropout probability to use.
+        cross_attention_dim (`int`, *optional*): The size of the encoder_hidden_states vector for cross attention.
+        activation_fn (`str`, *optional*, defaults to `"geglu"`): Activation function to be used in feed-forward.
+        num_embeds_ada_norm (:
+            obj: `int`, *optional*): The number of diffusion steps used during training. See `Transformer2DModel`.
+        attention_bias (:
+            obj: `bool`, *optional*, defaults to `False`): Configure if the attentions should contain a bias parameter.
+        only_cross_attention (`bool`, *optional*):
+            Whether to use only cross-attention layers. In this case two cross attention layers are used.
+        double_self_attention (`bool`, *optional*):
+            Whether to use two self-attention layers. In this case no cross attention layers are used.
+        upcast_attention (`bool`, *optional*):
+            Whether to upcast the attention computation to float32. This is useful for mixed precision training.
+        norm_elementwise_affine (`bool`, *optional*, defaults to `True`):
+            Whether to use learnable elementwise affine parameters for normalization.
+        norm_type (`str`, *optional*, defaults to `"layer_norm"`):
+            The normalization layer to use. Can be `"layer_norm"`, `"ada_norm"` or `"ada_norm_zero"`.
+        final_dropout (`bool` *optional*, defaults to False):
+            Whether to apply a final dropout after the last feed-forward layer.
+        attention_type (`str`, *optional*, defaults to `"default"`):
+            The type of attention to use. Can be `"default"` or `"gated"` or `"gated-text-image"`.
+        positional_embeddings (`str`, *optional*, defaults to `None`):
+            The type of positional embeddings to apply to.
+        num_positional_embeddings (`int`, *optional*, defaults to `None`):
+            The maximum number of positional embeddings to apply.
     """
 
     def __init__(
@@ -72,7 +120,7 @@ class BasicTransformerBlock(nn.Module):
         double_self_attention: bool = False,
         upcast_attention: bool = False,
         norm_elementwise_affine: bool = True,
-        norm_type: str = "layer_norm",
+        norm_type: str = "layer_norm",  # 'layer_norm', 'ada_norm', 'ada_norm_zero', 'ada_norm_single'
         norm_eps: float = 1e-5,
         final_dropout: bool = False,
         attention_type: str = "default",
@@ -82,23 +130,35 @@ class BasicTransformerBlock(nn.Module):
         super().__init__()
         self.only_cross_attention = only_cross_attention
 
-        self.use_ada_zero = norm_type == "ada_norm_zero" and num_embeds_ada_norm is not None
-        self.use_ada = norm_type == "ada_norm" and num_embeds_ada_norm is not None
-        self.use_ada_single = norm_type == "ada_norm_single"
+        self.use_ada_layer_norm_zero = (num_embeds_ada_norm is not None) and norm_type == "ada_norm_zero"
+        self.use_ada_layer_norm = (num_embeds_ada_norm is not None) and norm_type == "ada_norm"
+        self.use_ada_layer_norm_single = norm_type == "ada_norm_single"
         self.use_layer_norm = norm_type == "layer_norm"
+
+        if norm_type in ("ada_norm", "ada_norm_zero") and num_embeds_ada_norm is None:
+            raise ValueError(
+                f"`norm_type` is set to {norm_type}, but `num_embeds_ada_norm` is not defined. Please make sure to"
+                f" define `num_embeds_ada_norm` if setting `norm_type` to {norm_type}."
+            )
+
+        if positional_embeddings and (num_positional_embeddings is None):
+            raise ValueError(
+                "If `positional_embedding` type is defined, `num_positition_embeddings` must also be defined."
+            )
 
         if positional_embeddings == "sinusoidal":
             self.pos_embed = SinusoidalPositionalEmbedding(dim, max_seq_length=num_positional_embeddings)
         else:
             self.pos_embed = None
 
-        norm_cls = AdaLayerNormZero if self.use_ada_zero else (
-            AdaLayerNorm if self.use_ada else nn.LayerNorm
-        )
-
-        self.norm1 = norm_cls(dim, num_embeds_ada_norm) if norm_cls != nn.LayerNorm else norm_cls(
-            dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps
-        )
+        # Define 3 blocks. Each block has its own normalization layer.
+        # 1. Self-Attn
+        if self.use_ada_layer_norm:
+            self.norm1 = AdaLayerNorm(dim, num_embeds_ada_norm)
+        elif self.use_ada_layer_norm_zero:
+            self.norm1 = AdaLayerNormZero(dim, num_embeds_ada_norm)
+        else:
+            self.norm1 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
 
         self.attn1 = Attention(
             query_dim=dim,
@@ -110,12 +170,16 @@ class BasicTransformerBlock(nn.Module):
             upcast_attention=upcast_attention,
         )
 
+        # 2. Cross-Attn
         if cross_attention_dim is not None or double_self_attention:
-            norm2_cls = AdaLayerNorm if self.use_ada else nn.LayerNorm
-            self.norm2 = norm2_cls(
-                dim, num_embeds_ada_norm
-            ) if self.use_ada else norm2_cls(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
-
+            # We currently only use AdaLayerNormZero for self attention where there will only be one attention block.
+            # I.e. the number of returned modulation chunks from AdaLayerZero would not make sense if returned during
+            # the second cross attention block.
+            self.norm2 = (
+                AdaLayerNorm(dim, num_embeds_ada_norm)
+                if self.use_ada_layer_norm
+                else nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
+            )
             self.attn2 = Attention(
                 query_dim=dim,
                 cross_attention_dim=cross_attention_dim if not double_self_attention else None,
@@ -124,33 +188,39 @@ class BasicTransformerBlock(nn.Module):
                 dropout=dropout,
                 bias=attention_bias,
                 upcast_attention=upcast_attention,
-            )
+            )  # is self-attn if encoder_hidden_states is none
         else:
-            self.norm2, self.attn2 = None, None
+            self.norm2 = None
+            self.attn2 = None
 
-        if not self.use_ada_single:
+        # 3. Feed-forward
+        if not self.use_ada_layer_norm_single:
             self.norm3 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
 
         self.ff = FeedForward(dim, dropout=dropout, activation_fn=activation_fn, final_dropout=final_dropout)
 
-        if attention_type in {"gated", "gated-text-image"}:
+        # 4. Fuser
+        if attention_type == "gated" or attention_type == "gated-text-image":
             self.fuser = GatedSelfAttentionDense(dim, cross_attention_dim, num_attention_heads, attention_head_dim)
 
-        if self.use_ada_single:
+        # 5. Scale-shift for PixArt-Alpha.
+        if self.use_ada_layer_norm_single:
             self.scale_shift_table = nn.Parameter(torch.randn(6, dim) / dim**0.5)
 
+        # let chunk size default to None
         self._chunk_size = None
         self._chunk_dim = 0
 
     def set_chunk_feed_forward(self, chunk_size: Optional[int], dim: int):
+        # Sets chunk feed-forward
         self._chunk_size = chunk_size
         self._chunk_dim = dim
 
     def forward(
         self,
         hidden_states: torch.FloatTensor,
-        spatial_attn_inputs=[],
-        spatial_attn_idx=0,
+        spatial_attn_inputs = [],
+        spatial_attn_idx = 0,
         attention_mask: Optional[torch.FloatTensor] = None,
         encoder_hidden_states: Optional[torch.FloatTensor] = None,
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
@@ -158,72 +228,123 @@ class BasicTransformerBlock(nn.Module):
         cross_attention_kwargs: Dict[str, Any] = None,
         class_labels: Optional[torch.LongTensor] = None,
     ) -> torch.FloatTensor:
-
+        # Notice that normalization is always applied before the real computation in the following blocks.
+        # 0. Self-Attention
         batch_size = hidden_states.shape[0]
+
         spatial_attn_input = spatial_attn_inputs[spatial_attn_idx]
         spatial_attn_idx += 1
         hidden_states = torch.cat((hidden_states, spatial_attn_input), dim=1)
 
-        # First attention block
-        if self.use_ada:
-            normed = self.norm1(hidden_states, timestep)
-        elif self.use_ada_zero:
-            normed, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(
+        if self.use_ada_layer_norm:
+            norm_hidden_states = self.norm1(hidden_states, timestep)
+        elif self.use_ada_layer_norm_zero:
+            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(
                 hidden_states, timestep, class_labels, hidden_dtype=hidden_states.dtype
             )
-        elif self.use_ada_single:
+        elif self.use_layer_norm:
+            norm_hidden_states = self.norm1(hidden_states)
+        elif self.use_ada_layer_norm_single:
             shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
                 self.scale_shift_table[None] + timestep.reshape(batch_size, 6, -1)
             ).chunk(6, dim=1)
-            normed = self.norm1(hidden_states) * (1 + scale_msa) + shift_msa
+            norm_hidden_states = self.norm1(hidden_states)
+            norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
+            norm_hidden_states = norm_hidden_states.squeeze(1)
         else:
-            normed = self.norm1(hidden_states)
+            raise ValueError("Incorrect norm used")
 
         if self.pos_embed is not None:
-            normed = self.pos_embed(normed)
+            norm_hidden_states = self.pos_embed(norm_hidden_states)
 
-        lora_scale = cross_attention_kwargs.get("scale", 1.0) if cross_attention_kwargs else 1.0
-        cross_attention_kwargs = cross_attention_kwargs.copy() if cross_attention_kwargs else {}
-        gligen = cross_attention_kwargs.pop("gligen", None)
+        # 1. Retrieve lora scale.
+        lora_scale = cross_attention_kwargs.get("scale", 1.0) if cross_attention_kwargs is not None else 1.0
 
-        attn_out = self.attn1(normed, encoder_hidden_states if self.only_cross_attention else None, attention_mask, **cross_attention_kwargs)
-        if self.use_ada_zero:
-            attn_out *= gate_msa.unsqueeze(1)
-        elif self.use_ada_single:
-            attn_out *= gate_msa
+        # 2. Prepare GLIGEN inputs
+        cross_attention_kwargs = cross_attention_kwargs.copy() if cross_attention_kwargs is not None else {}
+        gligen_kwargs = cross_attention_kwargs.pop("gligen", None)
 
-        hidden_states = attn_out + hidden_states
+        attn_output = self.attn1(
+            norm_hidden_states,
+            encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
+            attention_mask=attention_mask,
+            **cross_attention_kwargs,
+        )
+        if self.use_ada_layer_norm_zero:
+            attn_output = gate_msa.unsqueeze(1) * attn_output
+        elif self.use_ada_layer_norm_single:
+            attn_output = gate_msa * attn_output
+
+        
+        hidden_states = attn_output + hidden_states
         hidden_states, _ = hidden_states.chunk(2, dim=1)
 
-        if gligen is not None:
-            hidden_states = self.fuser(hidden_states, gligen["objs"])
+        if hidden_states.ndim == 4:
+            hidden_states = hidden_states.squeeze(1)
 
-        # Cross attention
+        # 2.5 GLIGEN Control
+        if gligen_kwargs is not None:
+            hidden_states = self.fuser(hidden_states, gligen_kwargs["objs"])
+
+        # 3. Cross-Attention
         if self.attn2 is not None:
-            normed = self.norm2(hidden_states, timestep) if self.use_ada else self.norm2(hidden_states)
-            if self.pos_embed is not None and not self.use_ada_single:
-                normed = self.pos_embed(normed)
+            if self.use_ada_layer_norm:
+                norm_hidden_states = self.norm2(hidden_states, timestep)
+            elif self.use_ada_layer_norm_zero or self.use_layer_norm:
+                norm_hidden_states = self.norm2(hidden_states)
+            elif self.use_ada_layer_norm_single:
+                # For PixArt norm2 isn't applied here:
+                # https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L70C1-L76C103
+                norm_hidden_states = hidden_states
+            else:
+                raise ValueError("Incorrect norm")
 
-            hidden_states = self.attn2(normed, encoder_hidden_states, encoder_attention_mask, **cross_attention_kwargs) + hidden_states
+            if self.pos_embed is not None and self.use_ada_layer_norm_single is False:
+                norm_hidden_states = self.pos_embed(norm_hidden_states)
 
-        normed = self.norm3(hidden_states) if not self.use_ada_single else hidden_states
-        if self.use_ada_zero:
-            normed = normed * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        elif self.use_ada_single:
-            normed = self.norm2(hidden_states) * (1 + scale_mlp) + shift_mlp
+            attn_output = self.attn2(
+                norm_hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=encoder_attention_mask,
+                **cross_attention_kwargs,
+            )
+            hidden_states = attn_output + hidden_states
+
+        # 4. Feed-forward
+        if not self.use_ada_layer_norm_single:
+            norm_hidden_states = self.norm3(hidden_states)
+
+        if self.use_ada_layer_norm_zero:
+            norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+
+        if self.use_ada_layer_norm_single:
+            norm_hidden_states = self.norm2(hidden_states)
+            norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
 
         if self._chunk_size is not None:
-            chunks = normed.chunk(normed.shape[self._chunk_dim] // self._chunk_size, dim=self._chunk_dim)
-            ff_out = torch.cat([self.ff(chunk, scale=lora_scale) for chunk in chunks], dim=self._chunk_dim)
+            # "feed_forward_chunk_size" can be used to save memory
+            if norm_hidden_states.shape[self._chunk_dim] % self._chunk_size != 0:
+                raise ValueError(
+                    f"`hidden_states` dimension to be chunked: {norm_hidden_states.shape[self._chunk_dim]} has to be divisible by chunk size: {self._chunk_size}. Make sure to set an appropriate `chunk_size` when calling `unet.enable_forward_chunking`."
+                )
+
+            num_chunks = norm_hidden_states.shape[self._chunk_dim] // self._chunk_size
+            ff_output = torch.cat(
+                [
+                    self.ff(hid_slice, scale=lora_scale)
+                    for hid_slice in norm_hidden_states.chunk(num_chunks, dim=self._chunk_dim)
+                ],
+                dim=self._chunk_dim,
+            )
         else:
-            ff_out = self.ff(normed, scale=lora_scale)
+            ff_output = self.ff(norm_hidden_states, scale=lora_scale)
 
-        if self.use_ada_zero:
-            ff_out *= gate_mlp.unsqueeze(1)
-        elif self.use_ada_single:
-            ff_out *= gate_mlp
+        if self.use_ada_layer_norm_zero:
+            ff_output = gate_mlp.unsqueeze(1) * ff_output
+        elif self.use_ada_layer_norm_single:
+            ff_output = gate_mlp * ff_output
 
-        hidden_states = ff_out + hidden_states
+        hidden_states = ff_output + hidden_states
         if hidden_states.ndim == 4:
             hidden_states = hidden_states.squeeze(1)
 
@@ -231,9 +352,18 @@ class BasicTransformerBlock(nn.Module):
 
 
 class FeedForward(nn.Module):
+    r"""
+    A feed-forward layer.
+
+    Parameters:
+        dim (`int`): The number of channels in the input.
+        dim_out (`int`, *optional*): The number of channels in the output. If not given, defaults to `dim`.
+        mult (`int`, *optional*, defaults to 4): The multiplier to use for the hidden dimension.
+        dropout (`float`, *optional*, defaults to 0.0): The dropout probability to use.
+        activation_fn (`str`, *optional*, defaults to `"geglu"`): Activation function to be used in feed-forward.
+        final_dropout (`bool` *optional*, defaults to False): Apply a final dropout.
     """
-    Lightweight feedforward block for vision transformer modules.
-    """
+
     def __init__(
         self,
         dim: int,
@@ -246,28 +376,33 @@ class FeedForward(nn.Module):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = dim_out if dim_out is not None else dim
-        linear = LoRACompatibleLinear if not USE_PEFT_BACKEND else nn.Linear
+        linear_cls = LoRACompatibleLinear if not USE_PEFT_BACKEND else nn.Linear
 
-        activation = {
-            "gelu": GELU,
-            "gelu-approximate": lambda d, h: GELU(d, h, approximate="tanh"),
-            "geglu": GEGLU,
-            "geglu-approximate": ApproximateGELU,
-        }[activation_fn](dim, inner_dim)
+        if activation_fn == "gelu":
+            act_fn = GELU(dim, inner_dim)
+        if activation_fn == "gelu-approximate":
+            act_fn = GELU(dim, inner_dim, approximate="tanh")
+        elif activation_fn == "geglu":
+            act_fn = GEGLU(dim, inner_dim)
+        elif activation_fn == "geglu-approximate":
+            act_fn = ApproximateGELU(dim, inner_dim)
 
-        self.layers = nn.ModuleList([
-            activation,
-            nn.Dropout(dropout),
-            linear(inner_dim, dim_out),
-        ])
-
+        self.net = nn.ModuleList([])
+        # project in
+        self.net.append(act_fn)
+        # project dropout
+        self.net.append(nn.Dropout(dropout))
+        # project out
+        self.net.append(linear_cls(inner_dim, dim_out))
+        # FF as used in Vision Transformer, MLP-Mixer, etc. have a final dropout
         if final_dropout:
-            self.layers.append(nn.Dropout(dropout))
+            self.net.append(nn.Dropout(dropout))
 
     def forward(self, hidden_states: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
-        for layer in self.layers:
-            if isinstance(layer, (GEGLU,) if USE_PEFT_BACKEND else (GEGLU, LoRACompatibleLinear)):
-                hidden_states = layer(hidden_states, scale)
+        compatible_cls = (GEGLU,) if USE_PEFT_BACKEND else (GEGLU, LoRACompatibleLinear)
+        for module in self.net:
+            if isinstance(module, compatible_cls):
+                hidden_states = module(hidden_states, scale)
             else:
-                hidden_states = layer(hidden_states)
+                hidden_states = module(hidden_states)
         return hidden_states

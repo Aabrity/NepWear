@@ -9,7 +9,7 @@ from PIL import Image
 from diffusers import AutoencoderKL, UniPCMultistepScheduler
 from transformers import AutoProcessor, CLIPVisionModelWithProjection, CLIPTextModel, CLIPTokenizer
 
-from pipeline.py import NepaliWearVtonPipeline
+from pipelinenep import NepaliWearVtonPipeline
 from models.unet_Nepgarm_condition import UNetGarm2DConditionModel
 from models.unet_Nepvton_condition import UNetVton2DConditionModel
 
@@ -18,10 +18,10 @@ PROJECT_ROOT = Path(__file__).absolute().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Checkpoint paths (adjust if needed)
-VIT_PATH = "../checkpoints/clip-vit-large-patch14"
-VAE_PATH = "../checkpoints/ootd"
-UNET_PATH = "../checkpoints/ootd/ootd_dc/checkpoint-36000"
-MODEL_PATH = "../checkpoints/ootd"
+VIT_PATH = "checkpoints/clip-vit-large-patch14"
+VAE_PATH = "checkpoints/ootd"
+UNET_PATH = "checkpoints/ootd/ootd_dc/checkpoint-36000"
+MODEL_PATH = "checkpoints/ootd"
 
 
 class NepWear:
@@ -88,3 +88,4 @@ class NepWear:
             )
 
         return result.images
+  

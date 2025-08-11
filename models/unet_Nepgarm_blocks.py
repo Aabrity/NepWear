@@ -1,3 +1,4 @@
+
 # Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +14,7 @@
 # limitations under the License.
 
 # Modified by Yuhao Xu for OOTDiffusion (https://github.com/levihsu/OOTDiffusion)
+# Modified by Aabrity Dhungana for NepWear-VTON
 from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
@@ -20,7 +22,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .transformer_Nepgarm import NepVTONTransformer2DModel
+from .transformer_Nepgarm import Transformer2DModel
 
 from diffusers.utils import is_torch_version, logging
 from diffusers.utils.torch_utils import apply_freeu
